@@ -149,8 +149,26 @@ def analyze_with_pca(data, dataset_name, k, batch_size=1000, device='cuda'):
     # Standardize data
     data = standardize_data(data, device, batch_size)
     
-    # Get eigenvectors using plot_scree
-    _, _, eigenvecs = plot_scree(data, dataset_name, n_components=k, batch_size=batch_size, device=device)
+    # Compute covariance matrix in batches
+    n_samples, n_features = data.shape
+    print("\nComputing covariance matrix...")
+    cov_matrix = torch.zeros((n_features, n_features), device=device)
+    
+    n_batches = (n_samples - 1) // batch_size + 1
+    for i in range(n_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, n_samples)
+        batch = data[start_idx:end_idx]
+        cov_matrix += torch.matmul(batch.T, batch)
+        
+    cov_matrix /= (n_samples - 1)
+    
+    # Compute eigenvalues and eigenvectors
+    print("\nComputing eigendecomposition...")
+    eigenvals, eigenvecs = torch.linalg.eigh(cov_matrix)
+    
+    # Sort in descending order
+    eigenvecs = eigenvecs.flip(1)
     eigenvecs = eigenvecs.to(device)
     
     # Project data onto principal components
