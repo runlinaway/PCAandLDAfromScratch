@@ -39,161 +39,135 @@ def standardize_data(data, device='cuda', batch_size=4000):
     
     return standardized_data
 
-def plot_scree(data, dataset_name, n_components=None, batch_size=4000, device='cuda'):
+def plot_scree(loader, dataset_name, n_components=None, batch_size=1000, device='cuda'):
     """
-    Create a scree plot using GPU acceleration
+    Perform PCA and create scree plot for the given data
+    
+    Parameters:
+    -----------
+    loader : DataLoader
+        DataLoader containing the dataset
+    dataset_name : str
+        Name of the dataset for plotting
+    n_components : int, optional
+        Number of components to compute
+    batch_size : int
+        Batch size for processing
+    device : str
+        Device to use for computation
     """
-    if not torch.cuda.is_available() and device == 'cuda':
-        print("CUDA not available, falling back to CPU")
-        device = 'cpu'
+    # Get all data from the loader
+    data = loader.dataset.data
     
-    # Convert to torch tensor if needed
-    if isinstance(data, np.ndarray):
-        data = torch.from_numpy(data).float()
-    
-    # Move data to device
-    data = data.to(device)
-    
-    # Initialize parameters
+    # Get data dimensions
     n_samples, n_features = data.shape
-    batch_size = max(batch_size, n_features + 1)
-    n_components = min(batch_size - 1, n_features) if n_components is None else min(n_components, batch_size - 1)
     
-    print(f"\nAnalyzing {dataset_name} variance with {n_components} components...")
-    print(f"Using batch size of {batch_size} on {device}")
+    if n_components is None:
+        n_components = min(n_samples, n_features)
     
-    # Standardize data
-    data = standardize_data(data, device, batch_size)
+    # Center the data
+    mean = torch.mean(data, dim=0)
+    centered_data = data - mean
     
-    # Compute covariance matrix in batches
-    print("\nComputing covariance matrix...")
-    cov_matrix = torch.zeros((n_features, n_features), device=device)
-    
-    n_batches = (n_samples - 1) // batch_size + 1
-    for i in range(n_batches):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, n_samples)
-        batch = data[start_idx:end_idx]
-        
-        cov_matrix += torch.matmul(batch.T, batch)
-        
-        if i % 10 == 0:
-            print(f"Processed batch {i+1}/{n_batches}")
-    
-    cov_matrix /= (n_samples - 1)
+    # Compute covariance matrix
+    print("Computing covariance matrix...")
+    cov_matrix = torch.mm(centered_data.T, centered_data) / (n_samples - 1)
     
     # Compute eigenvalues and eigenvectors
-    print("\nComputing eigendecomposition...")
-    eigenvals, eigenvecs = torch.linalg.eigh(cov_matrix)
+    print("Computing eigendecomposition...")
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov_matrix)
     
-    # Sort in descending order
-    eigenvals = eigenvals.flip(0)
-    eigenvecs = eigenvecs.flip(1)
+    # Sort eigenvalues and eigenvectors in descending order
+    idx = torch.argsort(eigenvalues, descending=True)
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
     
-    # Calculate variance ratios
-    var_exp = (eigenvals / eigenvals.sum()).cpu().numpy()
+    # Calculate explained variance ratio
+    total_var = torch.sum(eigenvalues)
+    explained_var_ratio = eigenvalues / total_var
     
-    # Create plots
-    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 10))
+    # Calculate cumulative explained variance ratio
+    cumulative_var_ratio = torch.cumsum(explained_var_ratio, dim=0)
     
-    components = range(1, len(var_exp) + 1)
-    ax1.plot(components, var_exp, 'bo-')
-    ax1.set_xlabel('Principal Component')
-    ax1.set_ylabel('Explained Variance Ratio')
-    ax1.set_title(f'{dataset_name} - Individual Components')
-    
-    cumsum = np.cumsum(var_exp)
-    ax2.plot(components, cumsum, 'ro-')
-    ax2.set_xlabel('Number of Components')
-    ax2.set_ylabel('Cumulative Explained Variance Ratio')
-    ax2.set_title(f'{dataset_name} - Cumulative')
-    
-    thresholds = [0.7, 0.8, 0.9, 0.95]
-    colors = ['g', 'y', 'orange', 'r']
+    # Find k values for different variance thresholds
     k_values = {}
+    thresholds = [0.8, 0.85, 0.9, 0.95, 0.99]
+    for threshold in thresholds:
+        k = torch.where(cumulative_var_ratio >= threshold)[0][0].item() + 1
+        k_values[threshold] = k
     
-    for threshold, color in zip(thresholds, colors):
-        ax2.axhline(y=threshold, color=color, linestyle='--', alpha=0.5)
-        k = next((i for i, x in enumerate(cumsum) if x >= threshold), len(cumsum))
-        k_values[threshold] = k + 1
-        ax2.text(len(components) * 0.02, threshold + 0.02, 
-                f'{threshold*100}% variance at k={k + 1}', 
-                color=color)
+    # Create scree plot
+    plt.figure(figsize=(10, 5))
+    
+    # Plot individual explained variance
+    plt.subplot(1, 2, 1)
+    plt.plot(range(1, len(explained_var_ratio) + 1), 
+             explained_var_ratio.cpu().numpy(), 'bo-')
+    plt.title(f'{dataset_name} Scree Plot')
+    plt.xlabel('Principal Component')
+    plt.ylabel('Explained Variance Ratio')
+    
+    # Plot cumulative explained variance
+    plt.subplot(1, 2, 2)
+    plt.plot(range(1, len(cumulative_var_ratio) + 1), 
+             cumulative_var_ratio.cpu().numpy(), 'ro-')
+    plt.title(f'{dataset_name} Cumulative Explained Variance')
+    plt.xlabel('Number of Components')
+    plt.ylabel('Cumulative Explained Variance Ratio')
+    
+    # Add horizontal lines for thresholds
+    for threshold in thresholds:
+        plt.axhline(y=threshold, color='gray', linestyle='--', alpha=0.5)
+        plt.text(len(cumulative_var_ratio) * 0.6, threshold, 
+                f'{threshold:.0%} - {k_values[threshold]} components', 
+                verticalalignment='bottom')
     
     plt.tight_layout()
     plt.show()
     
-    print(f"\n{dataset_name} Variance Analysis:")
-    for threshold, k in k_values.items():
-        print(f"Components needed for {threshold*100}% variance: {k}")
-    
-    return var_exp, k_values, eigenvecs.cpu()
+    return explained_var_ratio.cpu().numpy(), k_values, eigenvectors.cpu().numpy()
 
-def analyze_with_pca(data, dataset_name, k, batch_size=1000, device='cuda'):
+def analyze_with_pca(loader, dataset_name, k, batch_size=1000, device='cuda'):
     """
-    Perform PCA dimension reduction using GPU acceleration
+    Perform PCA dimension reduction
+    
+    Parameters:
+    -----------
+    loader : DataLoader
+        DataLoader containing the dataset
+    dataset_name : str
+        Name of the dataset
+    k : int
+        Number of components to keep
+    batch_size : int
+        Batch size for processing
+    device : str
+        Device to use for computation
     """
-    if not torch.cuda.is_available() and device == 'cuda':
-        print("CUDA not available, falling back to CPU")
-        device = 'cpu'
+    # Get all data from the loader
+    data = loader.dataset.data
     
-    # Convert to torch tensor if needed
-    if isinstance(data, np.ndarray):
-        data = torch.from_numpy(data).float()
+    # Center the data
+    mean = torch.mean(data, dim=0)
+    centered_data = data - mean
     
-    # Move data to device
-    data = data.to(device)
-    
-    print(f"\nReducing {dataset_name} dimensions...")
-    
-    # Standardize data
-    data = standardize_data(data, device, batch_size)
-    
-    # Compute covariance matrix in batches
-    n_samples, n_features = data.shape
-    print("\nComputing covariance matrix...")
-    cov_matrix = torch.zeros((n_features, n_features), device=device)
-    
-    n_batches = (n_samples - 1) // batch_size + 1
-    for i in range(n_batches):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, n_samples)
-        batch = data[start_idx:end_idx]
-        cov_matrix += torch.matmul(batch.T, batch)
-        
-    cov_matrix /= (n_samples - 1)
+    # Compute covariance matrix
+    n_samples = data.shape[0]
+    cov_matrix = torch.mm(centered_data.T, centered_data) / (n_samples - 1)
     
     # Compute eigenvalues and eigenvectors
-    print("\nComputing eigendecomposition...")
-    eigenvals, eigenvecs = torch.linalg.eigh(cov_matrix)
+    eigenvalues, eigenvectors = torch.linalg.eigh(cov_matrix)
     
-    # Sort in descending order
-    eigenvecs = eigenvecs.flip(1)
-    eigenvecs = eigenvecs.to(device)
+    # Sort eigenvalues and eigenvectors in descending order
+    idx = torch.argsort(eigenvalues, descending=True)
+    eigenvalues = eigenvalues[idx]
+    eigenvectors = eigenvectors[:, idx]
     
-    # Project data onto principal components
-    n_samples = data.shape[0]
-    reduced_data = torch.zeros((n_samples, k), device=device)
+    # Select top k eigenvectors
+    selected_eigenvectors = eigenvectors[:, :k]
     
-    n_batches = (n_samples - 1) // batch_size + 1
-    for i in range(n_batches):
-        start_idx = i * batch_size
-        end_idx = min((i + 1) * batch_size, n_samples)
-        batch = data[start_idx:end_idx]
-        
-        # Project batch onto first k eigenvectors
-        reduced_data[start_idx:end_idx] = torch.matmul(batch, eigenvecs[:, :k])
-        
-        if i % 10 == 0:
-            print(f"Processed batch {i+1}/{n_batches}")
-    
-    # Move result back to CPU
-    reduced_data = reduced_data.cpu().numpy()
-    print(f"Reduced {dataset_name} shape: {reduced_data.shape}")
-    
-    # Clear GPU memory
-    if device == 'cuda':
-        torch.cuda.empty_cache()
+    # Project data onto new space
+    reduced_data = torch.mm(centered_data, selected_eigenvectors)
     
     return reduced_data
 
